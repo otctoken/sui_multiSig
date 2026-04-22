@@ -27,7 +27,7 @@ export function TransactionParser({
   const [signatureResult, setSignatureResult] = useState<any>(null);
   
   const [sig2Input, setSig2Input] = useState('');
-  const [multiSigPubKeyInput, setMultiSigPubKeyInput] = useState('');
+  const [multiSigPubKeyInput, setMultiSigPubKeyInput] = useState('AgCkk/qJ2WC5Ny1SfOb0IRtQGM4T7KZHlcLL4qcDM4zcNwEAjCph6in3fdy7pDZqSQDzXMnUgNvBdw6kDXMXpITumYUBAgA=');
   const [executeResult, setExecuteResult] = useState<any>(null);
 
   const currentAccount = useCurrentAccount();

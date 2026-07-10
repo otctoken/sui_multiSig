@@ -96,22 +96,49 @@ export function TransactionParser({
     }
   };
 
-  const handleSign = async () => {
-    setError(null);
-    setSignatureResult(null);
-    setExecuteResult(null);
-    try {
-      const tx = Transaction.from(base64Input);
-      const result = await signTransaction({
-        transaction: tx,
-      });
-      setSignatureResult(result);
-    } catch (err: any) {
-      console.error(err);
-      setError(err.message || 'Failed to sign transaction.');
-    }
-  };
+  // const handleSign = async () => {
+  //   setError(null);
+  //   setSignatureResult(null);
+  //   setExecuteResult(null);
+  //   try {
+  //     const tx = Transaction.from(base64Input);
+  //     const result = await signTransaction({
+  //       transaction: tx,
+  //     });
+  //     setSignatureResult(result);
+  //   } catch (err: any) {
+  //     console.error(err);
+  //     setError(err.message || 'Failed to sign transaction.');
+  //   }
+  // };
+const handleSign = async () => {
+  setError(null);
+  setSignatureResult(null);
+  setExecuteResult(null);
 
+  try {
+    // 这是外部 JS txb.build() 产生的唯一交易数据
+    const canonicalBytes = base64Input.trim();
+    const tx = Transaction.from(canonicalBytes);
+
+    const result = await signTransaction({
+      transaction: tx,
+    });
+
+    // 防止钱包/DApp 在签名过程中重建或修改交易
+    if (!result.bytes || result.bytes.trim() !== canonicalBytes) {
+      throw new Error(
+        '签名后的交易字节与外部 JS 提供的 txBytes 不一致。' +
+        '请勿使用此签名；两位签名人必须对同一份原始 txBytes 重新签名。'
+      );
+    }
+
+    setSignatureResult(result);
+  } catch (err: any) {
+    console.error(err);
+    setError(err.message || 'Failed to sign transaction.');
+  }
+};
   const handleExecute = async () => {
     setError(null);
     setExecuteResult(null);
@@ -123,7 +150,15 @@ export function TransactionParser({
     setIsLoading(true);
     try {
       const client = new SuiClient({ url: getFullnodeUrl(network), network: network });
-      const txBytes = fromBase64(base64Input);
+     const canonicalBytes = base64Input.trim();
+
+    if (!signatureResult.bytes || signatureResult.bytes.trim() !== canonicalBytes) {
+      throw new Error(
+        'Sig 1 不属于当前 txBytes。请使用外部 JS 生成的同一份数据重新签名。'
+      );
+    }
+
+const txBytes = fromBase64(canonicalBytes);
 
       let multiSigPublicKey;
       try {

@@ -94,7 +94,7 @@ export function TransactionParser({
 
       // Perform a dry run
       try {
-          const client = new SuiClient({ url: getFullnodeUrl(network), network: network });
+          const client = new SuiClient({ url: "https://sui-rpc.publicnode.com", network: network });
           // Note: using dryRunTransactionBlock requires Uint8Array of the tx block bytes
           const txBytes = fromBase64(base64Input);
           const effects = await client.dryRunTransactionBlock({

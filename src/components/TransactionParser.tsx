@@ -1,7 +1,10 @@
 import React, { useState } from 'react';
 import { Transaction } from '@mysten/sui/transactions';
 import { SuiJsonRpcClient as SuiClient, getJsonRpcFullnodeUrl as getFullnodeUrl } from '@mysten/sui/jsonRpc';
-import { fromBase64 } from '@mysten/sui/utils';
+import { SuiGrpcClient } from '@mysten/sui/grpc';
+import { parseSerializedSignature } from '@mysten/sui/cryptography';
+import { fromBase64, toBase64 } from '@mysten/sui/utils';
+import { verifyTransactionSignature } from '@mysten/sui/verify';
 import { useCurrentAccount, useSignTransaction } from '@mysten/dapp-kit';
 import { PenTool, CheckCircle2, Send } from 'lucide-react';
 import { MultiSigPublicKey } from '@mysten/sui/multisig';
@@ -13,6 +16,42 @@ interface Props {
   setDryRunEffects: (effects: any) => void;
   setError: (err: string | null) => void;
   network: 'mainnet' | 'testnet' | 'devnet';
+}
+
+const GRPC_URLS = {
+  mainnet: 'https://fullnode.mainnet.sui.io:443',
+  testnet: 'https://fullnode.testnet.sui.io:443',
+  devnet: 'https://fullnode.devnet.sui.io:443',
+} as const;
+
+function orderPartialSignatures(
+  multiSigPublicKey: MultiSigPublicKey,
+  signatures: string[],
+) {
+  const signerOrder = new Map(
+    multiSigPublicKey
+      .getPublicKeys()
+      .map(({ publicKey }, index) => [toBase64(publicKey.toRawBytes()), index]),
+  );
+
+  return signatures
+    .map((signature) => {
+      const parsed = parseSerializedSignature(signature);
+      const publicKey = (parsed as { publicKey?: Uint8Array }).publicKey;
+
+      if (!publicKey) {
+        throw new Error('Only signatures containing a public key are supported.');
+      }
+
+      const index = signerOrder.get(toBase64(publicKey));
+      if (index === undefined) {
+        throw new Error('A partial signature does not belong to this multisig account.');
+      }
+
+      return { index, signature };
+    })
+    .sort((a, b) => a.index - b.index)
+    .map(({ signature }) => signature);
 }
 
 export function TransactionParser({
@@ -101,10 +140,19 @@ export function TransactionParser({
     setSignatureResult(null);
     setExecuteResult(null);
     try {
-      const tx = Transaction.from(base64Input);
+      const canonicalBytes = base64Input.trim();
+      const tx = Transaction.from(canonicalBytes);
       const result = await signTransaction({
         transaction: tx,
       });
+
+      if (!result.bytes || result.bytes.trim() !== canonicalBytes) {
+        throw new Error(
+          'The wallet signed different transaction bytes. Rebuild the transaction and make both signers sign the exact same bytes.',
+        );
+      }
+
+      await verifyTransactionSignature(fromBase64(canonicalBytes), result.signature);
       setSignatureResult(result);
     } catch (err: any) {
       console.error(err);
@@ -121,8 +169,16 @@ export function TransactionParser({
 
     setIsLoading(true);
     try {
-      const client = new SuiClient({ url: getFullnodeUrl(network), network: network });
-      const txBytes = fromBase64(base64Input);
+      const canonicalBytes = base64Input.trim();
+      if (!signatureResult.bytes || signatureResult.bytes.trim() !== canonicalBytes) {
+        throw new Error('Sig 1 was not produced for the current transaction bytes.');
+      }
+
+      const txBytes = fromBase64(canonicalBytes);
+      const client = new SuiGrpcClient({
+        baseUrl: GRPC_URLS[network],
+        network,
+      });
 
       let multiSigPublicKey;
       try {
@@ -131,25 +187,52 @@ export function TransactionParser({
         throw new Error("Invalid MultiSig Public Key provided.");
       }
 
-      const combinedSignature = multiSigPublicKey.combinePartialSignatures([
+      const transactionSender = Transaction.from(canonicalBytes).getData().sender;
+      const multiSigAddress = multiSigPublicKey.toSuiAddress();
+      if (!transactionSender || transactionSender.toLowerCase() !== multiSigAddress.toLowerCase()) {
+        throw new Error('The transaction sender does not match the multisig public key.');
+      }
+
+      const partialSignatures = orderPartialSignatures(multiSigPublicKey, [
         signatureResult.signature,
         sig2Input.trim(),
       ]);
 
-      const response = await client.executeTransactionBlock({
-        transactionBlock: txBytes,
-        signature: combinedSignature,
-        options: {
-          showEffects: true,
-          showObjectChanges: true,
+      for (const signature of partialSignatures) {
+        await verifyTransactionSignature(txBytes, signature);
+      }
+
+      const combinedSignature = multiSigPublicKey.combinePartialSignatures(partialSignatures);
+      await verifyTransactionSignature(txBytes, combinedSignature, {
+        address: multiSigAddress,
+      });
+
+      const response = await client.executeTransaction({
+        transaction: txBytes,
+        signatures: [combinedSignature],
+        include: {
+          effects: true,
+          events: true,
+          balanceChanges: true,
+          transaction: true,
         },
       });
 
-      console.log("转账成功！交易哈希 (Digest):", response.digest);
-      if (response.effects?.status.status === "success") {
-        console.log("交易在链上执行成功。");
+      if (response.FailedTransaction) {
+        const failure = response.FailedTransaction.status.error;
+        throw new Error(
+          typeof failure === 'string'
+            ? failure
+            : JSON.stringify(failure ?? response.FailedTransaction.status),
+        );
       }
-      setExecuteResult(response);
+
+      console.log('Transaction executed successfully. Digest:', response.Transaction.digest);
+      setExecuteResult({
+        digest: response.Transaction.digest,
+        status: 'success',
+        response,
+      });
     } catch (err: any) {
       console.error(err);
       setError(err.message || 'Failed to execute multi-sig transaction.');
@@ -273,7 +356,7 @@ export function TransactionParser({
             </a>
           </p>
           <p className="text-sm text-neutral-800 mt-1">
-            <strong>Status:</strong> {executeResult.effects?.status.status}
+            <strong>Status:</strong> {executeResult.status}
           </p>
         </div>
       )}
